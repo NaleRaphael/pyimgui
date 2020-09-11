@@ -12,6 +12,7 @@ import cython
 from cython.view cimport array as cvarray
 from cython.operator cimport dereference as deref
 
+import ctypes
 from collections import namedtuple
 import warnings
 from contextlib import contextmanager
@@ -4821,6 +4822,43 @@ def drag_int4(
     ), (inout_values[0], inout_values[1], inout_values[2], inout_values[3])
 
 
+class InputTextCallbackDataStruct(ctypes.Structure):
+    _fields_ = (
+        ('EventFlag', ctypes.c_int32),       # ImGuiInputTextFlags: int
+        ('Flags', ctypes.c_int32),           # ImGuiInputTextFlags: int
+        ('UserData', ctypes.c_void_p),       # void*
+        ('EventChar', ctypes.c_ushort),      # ImWchar: unsigned short
+        ('EventKey', ctypes.c_int32),        # ImGuiKey: int
+        ('Buf', ctypes.c_char_p),            # char*
+        ('BufTextLen', ctypes.c_int32),      # int
+        ('BufSize', ctypes.c_int32),         # int
+        ('BufDirty', ctypes.c_bool),         # int
+        ('CursorPos', ctypes.c_int),         # int
+        ('SelectionStart', ctypes.c_int),    # int
+        ('SelectionEnd', ctypes.c_int),      # int
+    )
+
+
+# reference: https://stackoverflow.com/questions/51044122
+cdef class InputTextCallbackWrapper:
+    cdef object python_func
+    cdef object wrapper
+
+    def __cinit__(self, python_func):
+        self.python_func = python_func
+        ftype = ctypes.CFUNCTYPE(
+            ctypes.c_int,                                   # ret_type
+            ctypes.POINTER(InputTextCallbackDataStruct)     # arg_type
+        )
+        self.wrapper = ftype(self.inner_func)
+
+    def inner_func(self, user_data):
+        return self.python_func(user_data)
+
+    cdef cimgui.ImGuiInputTextCallback get_func_ptr(self):
+        return (<cimgui.ImGuiInputTextCallback *><size_t>ctypes.addressof(self.wrapper))[0]
+
+
 def input_text(
     str label,
     str value,
@@ -4889,7 +4927,8 @@ def input_text_multiline(
     int buffer_length,
     float width=0,
     float height=0,
-    cimgui.ImGuiInputTextFlags flags=0
+    cimgui.ImGuiInputTextFlags flags=0,
+    callback=None,
 ):
     """Display multiline text input widget.
 
@@ -4920,6 +4959,9 @@ def input_text_multiline(
         height (float): height of the textbox
         flags: InputText flags. See:
             :ref:`list of available flags <inputtext-flag-options>`.
+        callback (function): a Python function to be invoked whenere there
+            are changes in textbox. Note that this callback only works when
+            a flag of `INPUT_TEXT_CALLBACK_*` is given.
 
     Returns:
         tuple: a ``(changed, value)`` tuple that contains indicator of
@@ -4940,10 +4982,18 @@ def input_text_multiline(
     # todo: take special care of terminating char
     strncpy(inout_text, _bytes(value), buffer_length)
 
+    if callback is None:
+        callback_ptr = NULL
+        user_data = NULL
+    else:
+        # todo: avoid re-creating this
+        callback_ptr = InputTextCallbackWrapper(callback).get_func_ptr()
+        user_data = inout_text
+
     changed = cimgui.InputTextMultiline(
         _bytes(label), inout_text, buffer_length,
         _cast_args_ImVec2(width, height), flags,
-        NULL, NULL
+        <cimgui.ImGuiInputTextCallback>callback_ptr, <void*>user_data
     )
     output = _from_bytes(inout_text)
 

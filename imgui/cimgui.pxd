@@ -176,6 +176,28 @@ cdef extern from "imgui.h":
         #float       NavInputsDownDuration[ImGuiNavInput_COUNT]   # ✗
         #float       NavInputsDownDurationPrev[ImGuiNavInput_COUNT] # ✗
 
+    ctypedef struct ImGuiInputTextCallbackData:
+        ImGuiInputTextFlags EventFlag
+        ImGuiInputTextFlags Flags
+        void*               UserData
+
+        # ====
+        # source-note: Arguments fro the different callback events
+        ImWchar             EventChar
+        ImGuiKey            EventKey
+        char*               Buf
+        int                 BufTextLen
+        int                 BufSize
+        bool                BufDirty
+        int                 CursorPos
+        int                 SelectionStart
+        int                 SelectionEnd
+
+        # ====
+        # ImGuiInputTextCallbackData()        # todo: figure out how to deal with constructor
+        # void      DeleteChars(int pos, int bytes_count) except +
+        # void      InsertChars(int pos, const char* text, const char* text_end = NULL) except +
+        # bool      HasSelection() const { return SelectionStart != SelectionEnd; } except +
 
     cdef cppclass ImVector[T]:
         int        Size
