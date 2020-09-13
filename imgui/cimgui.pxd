@@ -194,10 +194,10 @@ cdef extern from "imgui.h":
         int                 SelectionEnd
 
         # ====
-        # ImGuiInputTextCallbackData()        # todo: figure out how to deal with constructor
-        # void      DeleteChars(int pos, int bytes_count) except +
-        # void      InsertChars(int pos, const char* text, const char* text_end = NULL) except +
-        # bool      HasSelection() const { return SelectionStart != SelectionEnd; } except +
+        # ImGuiInputTextCallbackData() except +       # todo: figure out how to deal with constructor
+        void      DeleteChars(int pos, int bytes_count) except +
+        void      InsertChars(int pos, const char* text, const char* text_end = NULL) except +
+        bool      HasSelection() except+
 
     cdef cppclass ImVector[T]:
         int        Size

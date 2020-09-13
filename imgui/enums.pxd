@@ -305,3 +305,4 @@ cdef extern from "imgui.h":
         ImGuiInputTextFlags_Password            # Password mode, display all characters as '*'
         ImGuiInputTextFlags_NoUndoRedo          # Disable undo/redo. Note that input text owns the text data while active, if you want to provide your own undo/redo stack you need e.g. to call ClearActiveID().
         ImGuiInputTextFlags_CharsScientific     # Allow 0123456789.+-*/eE (Scientific notation input)
+        ImGuiInputTextFlags_CallbackResize      # Allow buffer capacity resize + notify when the string wants to be resized (for string types which hold a cache of their Size) (see misc/stl/imgui_stl.h for an example of using this)

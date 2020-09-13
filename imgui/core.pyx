@@ -245,6 +245,7 @@ INPUT_TEXT_CALLBACK_COMPLETION = enums.ImGuiInputTextFlags_CallbackCompletion
 INPUT_TEXT_CALLBACK_HISTORY = enums.ImGuiInputTextFlags_CallbackHistory
 INPUT_TEXT_CALLBACK_ALWAYS = enums.ImGuiInputTextFlags_CallbackAlways
 INPUT_TEXT_CALLBACK_CHAR_FILTER = enums.ImGuiInputTextFlags_CallbackCharFilter
+INPUT_TEXT_CALLBACK_RESIZE = enums.ImGuiInputTextFlags_CallbackResize
 INPUT_TEXT_ALLOW_TAB_INPUT = enums.ImGuiInputTextFlags_AllowTabInput
 INPUT_TEXT_CTRL_ENTER_FOR_NEW_LINE = enums.ImGuiInputTextFlags_CtrlEnterForNewLine
 INPUT_TEXT_NO_HORIZONTAL_SCROLL = enums.ImGuiInputTextFlags_NoHorizontalScroll
@@ -4822,41 +4823,107 @@ def drag_int4(
     ), (inout_values[0], inout_values[1], inout_values[2], inout_values[3])
 
 
-class InputTextCallbackDataStruct(ctypes.Structure):
-    _fields_ = (
-        ('EventFlag', ctypes.c_int32),       # ImGuiInputTextFlags: int
-        ('Flags', ctypes.c_int32),           # ImGuiInputTextFlags: int
-        ('UserData', ctypes.c_void_p),       # void*
-        ('EventChar', ctypes.c_ushort),      # ImWchar: unsigned short
-        ('EventKey', ctypes.c_int32),        # ImGuiKey: int
-        ('Buf', ctypes.c_char_p),            # char*
-        ('BufTextLen', ctypes.c_int32),      # int
-        ('BufSize', ctypes.c_int32),         # int
-        ('BufDirty', ctypes.c_bool),         # int
-        ('CursorPos', ctypes.c_int),         # int
-        ('SelectionStart', ctypes.c_int),    # int
-        ('SelectionEnd', ctypes.c_int),      # int
-    )
+cdef class InputTextCallbackConfig:
+    cdef public bool convert_tab_to_spaces
+    cdef public int tab_to_spaces_number
+
+    # NOTE: Though this is a public field, it's just for internal use. It will
+    # be True when this config object is not created by user.
+    cdef public bool _using_default
+
+    def __cinit__(self, convert_tab_to_spaces=False, tab_to_spaces_number=4):
+        self._using_default = False
+        self.convert_tab_to_spaces = convert_tab_to_spaces
+        self.tab_to_spaces_number = tab_to_spaces_number
 
 
-# reference: https://stackoverflow.com/questions/51044122
-cdef class InputTextCallbackWrapper:
-    cdef object python_func
-    cdef object wrapper
+_input_text_callback_config = None
+def get_input_text_callback_config():
+    global _input_text_callback_config
 
-    def __cinit__(self, python_func):
-        self.python_func = python_func
-        ftype = ctypes.CFUNCTYPE(
-            ctypes.c_int,                                   # ret_type
-            ctypes.POINTER(InputTextCallbackDataStruct)     # arg_type
-        )
-        self.wrapper = ftype(self.inner_func)
+    if not _input_text_callback_config:
+        # Set to default values
+        _input_text_callback_config = InputTextCallbackConfig()
+        _input_text_callback_config._using_default = True
 
-    def inner_func(self, user_data):
-        return self.python_func(user_data)
+    return _input_text_callback_config
 
-    cdef cimgui.ImGuiInputTextCallback get_func_ptr(self):
-        return (<cimgui.ImGuiInputTextCallback *><size_t>ctypes.addressof(self.wrapper))[0]
+
+cdef class InputTextState:
+    cdef public int event_flag, event_char, event_key
+    cdef public bool has_pending_event
+
+    def __cinit__(self):
+        self.reset()
+
+    def reset(self):
+        self.event_flag = -1
+        self.event_char = -1
+        self.event_key = -1
+        self.has_pending_event = False
+
+
+_input_text_state = None
+def get_input_text_state():
+    global _input_text_state
+
+    if not _input_text_state:
+        _input_text_state = InputTextState()
+
+    return _input_text_state
+
+
+cdef int input_text_callback(cimgui.ImGuiInputTextCallbackData* data):
+    # Desired returned value of this callback indicating whether incoming key should be filtered
+    is_filtered = 0
+
+    state = get_input_text_state()
+    if (not state.has_pending_event and data.EventKey == enums.ImGuiKey_COUNT and
+        data.EventFlag == enums.ImGuiInputTextFlags_CallbackAlways and data.EventChar == 0):
+        return is_filtered
+
+    callback_config = get_input_text_callback_config()
+
+    if state.has_pending_event:
+        state.has_pending_event = False     # reset state
+
+        if state.event_char == 9 and callback_config.convert_tab_to_spaces:
+            if data.HasSelection():
+                # todo: indent text
+                pass
+            else:
+                is_filtered = _replace_tab_with_spaces(data)
+
+        # todo: unindent text
+    else:
+        # Filter KEY_TAB
+        if data.EventChar == 9 and callback_config.convert_tab_to_spaces:
+            state.has_pending_event = True
+            is_filtered = 1
+
+    state.event_flag = data.EventFlag
+    state.event_char = data.EventChar
+    state.event_key = data.EventKey
+    return is_filtered
+
+
+cdef int _replace_tab_with_spaces(cimgui.ImGuiInputTextCallbackData* data):
+    # Current event should not be `ImGuiInputTextFlags_CallbackCharFilter` because `data.Buf` will be NULL.
+    assert data.EventFlag != enums.ImGuiInputTextFlags_CallbackCharFilter
+    callback_config = get_input_text_callback_config()
+    data.InsertChars(data.CursorPos, b' ' * callback_config.tab_to_spaces_number)
+    return 0
+
+
+cdef int _indent(cimgui.ImGuiInputTextCallbackData* data):
+    # print(f"[cython] going to delete char, pos: {data.CursorPos - 1}, BufTextLen: {data.BufTextLen}")
+    # data.DeleteChars(data.CursorPos, 1)
+    # data.InsertChars(data.CursorPos, b'_TAB')
+    return 0
+
+
+cdef int _unindent(cimgui.ImGuiInputTextCallbackData* data):
+    return 0
 
 
 def input_text(
@@ -4928,7 +4995,7 @@ def input_text_multiline(
     float width=0,
     float height=0,
     cimgui.ImGuiInputTextFlags flags=0,
-    callback=None,
+    InputTextCallbackConfig callback_config=None
 ):
     """Display multiline text input widget.
 
@@ -4959,9 +5026,17 @@ def input_text_multiline(
         height (float): height of the textbox
         flags: InputText flags. See:
             :ref:`list of available flags <inputtext-flag-options>`.
-        callback (function): a Python function to be invoked whenere there
-            are changes in textbox. Note that this callback only works when
-            a flag of `INPUT_TEXT_CALLBACK_*` is given.
+        callback_config (InputTextCallbackConfig): a configuration object for
+            callback functions. See also `InputTextCallbackConfig` class for
+            further details. And note that user should also set the following
+            flags to make currently implemented Cython callback function work
+            fully functional.
+
+            Required flags:
+            - imgui.INPUT_TEXT_ALLOW_TAB_INPUT
+            - imgui.INPUT_TEXT_CALLBACK_ALWAYS
+            - imgui.INPUT_TEXT_CALLBACK_CHAR_FILTER
+            - imgui.INPUT_TEXT_CALLBACK_RESIZE
 
     Returns:
         tuple: a ``(changed, value)`` tuple that contains indicator of
@@ -4982,13 +5057,19 @@ def input_text_multiline(
     # todo: take special care of terminating char
     strncpy(inout_text, _bytes(value), buffer_length)
 
-    if callback is None:
+    cdef cimgui.ImGuiInputTextCallback callback_ptr
+
+    if callback_config is None:
         callback_ptr = NULL
         user_data = NULL
     else:
-        # todo: avoid re-creating this
-        callback_ptr = InputTextCallbackWrapper(callback).get_func_ptr()
+        callback_ptr = <cimgui.ImGuiInputTextCallback>input_text_callback
         user_data = inout_text
+
+        # Use configuration provided by user
+        global _input_text_callback_config
+        if _input_text_callback_config is None:
+            _input_text_callback_config = callback_config
 
     changed = cimgui.InputTextMultiline(
         _bytes(label), inout_text, buffer_length,
