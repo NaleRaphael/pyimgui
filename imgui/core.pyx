@@ -12,7 +12,6 @@ import cython
 from cython.view cimport array as cvarray
 from cython.operator cimport dereference as deref
 
-import ctypes
 from collections import namedtuple
 import warnings
 from contextlib import contextmanager
@@ -4836,6 +4835,13 @@ cdef class InputTextCallbackConfig:
         self.convert_tab_to_spaces = convert_tab_to_spaces
         self.tab_to_spaces_number = tab_to_spaces_number
 
+    @property
+    def char_indent(self):
+        if self.convert_tab_to_spaces:
+            return " " * self.tab_to_spaces_number
+        else:
+            return "\t"
+
 
 _input_text_callback_config = None
 def get_input_text_callback_config():
@@ -4850,6 +4856,16 @@ def get_input_text_callback_config():
 
 
 cdef class InputTextState:
+    """A storage for states in `ImGuiInputTextCallbackData`.
+    
+    In Python, we can use a instance method (i.e. a method defined in a class,
+    so that method can access attributes of the instance) as a callback method
+    in order to store information in the instance it belongs to.
+
+    However, a `cdef` method cannot do that even it's defined under a `cdef`
+    class. Hence that we adopt the approach which is the same as how `get_io()`
+    storing information by a global variable.
+    """
     cdef public int event_flag, event_char, event_key
     cdef public bool has_pending_event
 
@@ -4861,6 +4877,10 @@ cdef class InputTextState:
         self.event_char = -1
         self.event_key = -1
         self.has_pending_event = False
+
+    @property
+    def has_selection(self):
+        return self.selection_start != self.selection_end
 
 
 _input_text_state = None
@@ -4874,32 +4894,37 @@ def get_input_text_state():
 
 
 cdef int input_text_callback(cimgui.ImGuiInputTextCallbackData* data):
-    # Desired returned value of this callback indicating whether incoming key should be filtered
+    # Desired returned value of this callback indicating whether incoming key should be filtered.
     is_filtered = 0
 
     state = get_input_text_state()
-    if (not state.has_pending_event and data.EventKey == enums.ImGuiKey_COUNT and
-        data.EventFlag == enums.ImGuiInputTextFlags_CallbackAlways and data.EventChar == 0):
-        return is_filtered
-
     callback_config = get_input_text_callback_config()
 
-    if state.has_pending_event:
-        state.has_pending_event = False     # reset state
+    # NOTE: Since information of text selection (`SelectionStart` and `SelectionEnd`) are not
+    # available and `data.Buf` is NULL when incoming event is "CallbackCharFilter", we shouldn't
+    # do any operation that requires to modify `data.Buf` during that event.
+    if state.has_pending_event and not data.EventFlag == enums.ImGuiInputTextFlags_CallbackCharFilter:
 
-        if state.event_char == 9 and callback_config.convert_tab_to_spaces:
-            if data.HasSelection():
-                # todo: indent text
-                pass
+        # NOTE: `data.EventChar` won't be updated when a modifier key is pressed, so that we
+        # have to detect ImGuiIO.keys_down[KEY_TAB] too.
+        if (state.event_char == 9 or get_io().keys_down[KEY_TAB]):
+            if get_io().key_ctrl:
+                is_filtered = _input_text_unindent(data)
+                state.has_pending_event = False
             else:
-                is_filtered = _replace_tab_with_spaces(data)
+                is_filtered = _input_text_indent(data)
+                state.has_pending_event = False
 
-        # todo: unindent text
+        # ... more operations can be added in here
     else:
-        # Filter KEY_TAB
-        if data.EventChar == 9 and callback_config.convert_tab_to_spaces:
+        if data.EventChar == 9:     # KEY_TAB
             state.has_pending_event = True
             is_filtered = 1
+        elif get_io().key_ctrl:
+            # NOTE: State of modifier keys won't be reset until there is another key is pressed,
+            # so that we have to keep tracing it.
+            state.has_pending_event = True
+            is_filtered = 0
 
     state.event_flag = data.EventFlag
     state.event_char = data.EventChar
@@ -4907,22 +4932,139 @@ cdef int input_text_callback(cimgui.ImGuiInputTextCallbackData* data):
     return is_filtered
 
 
-cdef int _replace_tab_with_spaces(cimgui.ImGuiInputTextCallbackData* data):
-    # Current event should not be `ImGuiInputTextFlags_CallbackCharFilter` because `data.Buf` will be NULL.
+cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
     assert data.EventFlag != enums.ImGuiInputTextFlags_CallbackCharFilter
     callback_config = get_input_text_callback_config()
-    data.InsertChars(data.CursorPos, b' ' * callback_config.tab_to_spaces_number)
+
+    is_selection_reversed = False
+    if data.HasSelection():
+        start, end = data.SelectionStart, data.SelectionEnd
+        if start > end:
+            is_selection_reversed = True
+            start, end = end, start
+
+        head = data.Buf[:start].decode()
+        tail = data.Buf[end:].decode()
+        text = data.Buf[start:end].decode()
+    else:
+        return _input_text_indent_single_line(data)
+
+    char_indent = callback_config.char_indent
+    start, end = 0, len(text)
+    result = ""
+    idx = 0
+
+    # Main loop for indentaion insertion
+    while start < len(data.Buf) and idx != -1:
+        idx = text[start:end].find("\n")
+        if idx == -1:
+            result += text[start:end]
+            break
+        else:
+            result += f"{char_indent}{text[start:(start+idx+1)]}"
+            start += idx + 1
+
+    # Update buffer
+    result = head + result + tail
+    result_len = len(result)
+    strncpy(data.Buf, _bytes(result), result_len + 1)
+
+    # Update state of callback data
+    data.BufTextLen = result_len
+    data.CursorPos = result_len
+    data.BufDirty = True
+
+    # NOTE: Position of selection index (start or end) should also be updated.
+    # Otherwise, there will be redundant characters appearing in head or tail
+    # when user is going to repeat unindenting text.
+    if data.HasSelection():
+        if is_selection_reversed:
+            data.SelectionStart = result_len
+        else:
+            data.SelectionEnd = result_len
     return 0
 
 
-cdef int _indent(cimgui.ImGuiInputTextCallbackData* data):
-    # print(f"[cython] going to delete char, pos: {data.CursorPos - 1}, BufTextLen: {data.BufTextLen}")
-    # data.DeleteChars(data.CursorPos, 1)
-    # data.InsertChars(data.CursorPos, b'_TAB')
+cdef int _input_text_indent_single_line(cimgui.ImGuiInputTextCallbackData* data):
+    assert data.EventFlag != enums.ImGuiInputTextFlags_CallbackCharFilter
+    callback_config = get_input_text_callback_config()
+    data.InsertChars(data.CursorPos, callback_config.char_indent.encode())
     return 0
 
 
-cdef int _unindent(cimgui.ImGuiInputTextCallbackData* data):
+cdef int _input_text_unindent(cimgui.ImGuiInputTextCallbackData* data):
+    assert data.EventFlag != enums.ImGuiInputTextFlags_CallbackCharFilter
+    callback_config = get_input_text_callback_config()
+    char_indent = callback_config.char_indent
+
+    is_selection_reversed = False
+    start, end = data.SelectionStart, data.SelectionEnd
+    if data.HasSelection() and start > end:
+        is_selection_reversed = True
+        start, end = end, start
+
+    if data.HasSelection():
+        head = data.Buf[:start].decode()
+        tail = data.Buf[end:].decode()
+        text = data.Buf[start:end].decode()
+    else:
+        # Unindent single line
+        head = data.Buf[:data.CursorPos].decode()
+        start = len(head)
+        while start > 0 and head[start - 1] != "\n":
+            start -= 1
+        if len(char_indent) > 1:          # we are using spaces for indentation
+            if start + len(char_indent) > len(head):
+                end = len(head)
+                if head[start:end] == char_indent[:end-start]:
+                    data.DeleteChars(start, end-start)
+            else:
+                data.DeleteChars(start, len(char_indent))
+        elif head[start] == char_indent:  # we are using tab for indentation
+            data.DeleteChars(start, 1)
+        return 0
+
+    len_indent = len(char_indent)
+    start, end = 0, len(text)
+    result = ""
+    idx, offset = 0, 0
+
+    # Main loop for indentation removal
+    while start < end and idx != -1:
+        idx = text[start:end].find("\n")
+        if idx == -1:
+            result += text[start:end]
+            break
+        elif idx == 0:
+            # First char is "\n", we have to jump over it to avoid infinite loop.
+            result += text[start]
+            start += 1
+        else:
+            if char_indent == "\t":
+                offset = 1 if text[start] == "\t" else 0
+            else:
+                offset = len_indent if text[start:start+len_indent] == char_indent else 0
+            # NOTE: Select to position `start+idx+1` because we want to insert the
+            # found newline char now.
+            result += text[(start+offset):(start+idx+1)]
+            start += idx + 1
+
+    # Update buffer
+    result = head + result + tail
+    result_len = len(result)
+    strncpy(data.Buf, _bytes(result), result_len + 1)
+
+    # Update state of callback data
+    data.BufTextLen = result_len
+    data.CursorPos = result_len
+    data.BufDirty = True
+
+    # NOTE: Position of selection index (start or end) should also be updated.
+    if data.HasSelection():
+        if is_selection_reversed:
+            data.SelectionStart = result_len
+        else:
+            data.SelectionEnd = result_len
     return 0
 
 
