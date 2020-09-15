@@ -4937,6 +4937,7 @@ cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
     callback_config = get_input_text_callback_config()
 
     is_selection_reversed = False
+    not_ends_with_newline = False
     if data.HasSelection():
         start, end = data.SelectionStart, data.SelectionEnd
         if start > end:
@@ -4944,8 +4945,33 @@ cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
             start, end = end, start
 
         head = data.Buf[:start].decode()
-        tail = data.Buf[end:].decode()
+        # Forward searching for new line character in case indentaion char will
+        # be inserted between characters of a word
+        if start > 0 and head[-1] != "\n":
+            start = head.rfind("\n")
+            if start == -1:
+                start = 0
+            else:
+                # Skip that new line character because each line should ends with
+                # a new line character.
+                start += 1
+            head = data.Buf[:start].decode()
+
         text = data.Buf[start:end].decode()
+        tail = data.Buf[end:].decode()
+
+        # Backward searching for new line character in case the last line of text
+        # won't be indented
+        if end < len(data.Buf) and text[-1] != "\n":
+            idx = tail.find("\n")
+            if idx == -1:
+                not_ends_with_newline = True
+            else:
+                end += idx + 1
+                text = data.Buf[start:end].decode()
+                tail = data.Buf[end:].decode()
+
+        assert head + text + tail == data.Buf.decode(), "head, text, tail mismatched"
     else:
         return _input_text_indent_single_line(data)
 
@@ -4955,14 +4981,26 @@ cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
     idx = 0
 
     # Main loop for indentaion insertion
-    while start < len(data.Buf) and idx != -1:
+    while start < end and idx != -1:
         idx = text[start:end].find("\n")
         if idx == -1:
-            result += text[start:end]
+            if not_ends_with_newline:
+                result += f"{char_indent}{text[start:end]}"
+            else:
+                result += text[start:end]
             break
         else:
             result += f"{char_indent}{text[start:(start+idx+1)]}"
             start += idx + 1
+
+    # NOTE: Position of selection index (start or end) should also be updated.
+    # Otherwise, there will be redundant characters appearing in head or tail
+    # when user is going to repeat unindenting text.
+    if data.HasSelection():
+        if is_selection_reversed:
+            data.SelectionStart = len(head) + len(result)
+        else:
+            data.SelectionEnd = len(head) + len(result)
 
     # Update buffer
     result = head + result + tail
@@ -4973,15 +5011,6 @@ cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
     data.BufTextLen = result_len
     data.CursorPos = result_len
     data.BufDirty = True
-
-    # NOTE: Position of selection index (start or end) should also be updated.
-    # Otherwise, there will be redundant characters appearing in head or tail
-    # when user is going to repeat unindenting text.
-    if data.HasSelection():
-        if is_selection_reversed:
-            data.SelectionStart = result_len
-        else:
-            data.SelectionEnd = result_len
     return 0
 
 
@@ -5005,6 +5034,14 @@ cdef int _input_text_unindent(cimgui.ImGuiInputTextCallbackData* data):
 
     if data.HasSelection():
         head = data.Buf[:start].decode()
+        # Forward searching for new line character in case indentaion char will
+        # be inserted between characters of a word.
+        if start > 0 and head[-1] != "\n":
+            start = head.rfind("\n")
+            if start == -1:
+                start = 0
+            head = data.Buf[:start].decode()
+
         tail = data.Buf[end:].decode()
         text = data.Buf[start:end].decode()
     else:
