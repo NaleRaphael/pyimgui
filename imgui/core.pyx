@@ -4939,39 +4939,42 @@ cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
     is_selection_reversed = False
     not_ends_with_newline = False
     if data.HasSelection():
-        start, end = data.SelectionStart, data.SelectionEnd
-        if start > end:
+        sel_start, sel_end = data.SelectionStart, data.SelectionEnd
+        if sel_start > sel_end:
             is_selection_reversed = True
-            start, end = end, start
+            sel_start, sel_end = sel_end, sel_start
 
-        head = data.Buf[:start].decode()
+        head = data.Buf[:sel_start].decode()
         # Forward searching for new line character in case indentaion char will
         # be inserted between characters of a word
-        if start > 0 and head[-1] != "\n":
-            start = head.rfind("\n")
-            if start == -1:
-                start = 0
+        if sel_start > 0 and head[-1] != "\n":
+            sel_start = head.rfind("\n")
+            if sel_start == -1:
+                sel_start = 0
             else:
                 # Skip that new line character because each line should ends with
                 # a new line character.
-                start += 1
-            head = data.Buf[:start].decode()
+                sel_start += 1
+            head = data.Buf[:sel_start].decode()
 
-        text = data.Buf[start:end].decode()
-        tail = data.Buf[end:].decode()
+        text = data.Buf[sel_start:sel_end].decode()
+        tail = data.Buf[sel_end:].decode()
 
         # Backward searching for new line character in case the last line of text
         # won't be indented
-        if end < len(data.Buf) and text[-1] != "\n":
+        if sel_end <= len(data.Buf) and text[-1] != "\n":
             idx = tail.find("\n")
             if idx == -1:
                 not_ends_with_newline = True
+                sel_end = len(data.Buf)
             else:
-                end += idx + 1
-                text = data.Buf[start:end].decode()
-                tail = data.Buf[end:].decode()
+                sel_end += idx + 1
+                text = data.Buf[sel_start:sel_end].decode()
+                tail = data.Buf[sel_end:].decode()
 
-        assert head + text + tail == data.Buf.decode(), "head, text, tail mismatched"
+        assert head + text + tail == data.Buf.decode(), (
+            "Recombination of text does not equal to the original one"
+        )
     else:
         return _input_text_indent_single_line(data)
 
@@ -4993,24 +4996,27 @@ cdef int _input_text_indent(cimgui.ImGuiInputTextCallbackData* data):
             result += f"{char_indent}{text[start:(start+idx+1)]}"
             start += idx + 1
 
+    # Update buffer
+    buf = head + result + tail
+    buf_len = len(buf)
+    strncpy(data.Buf, _bytes(buf), buf_len + 1)
+
+    # Update state of callback data
+    data.BufTextLen = buf_len
+    data.BufDirty = True
+
     # NOTE: Position of selection index (start or end) should also be updated.
     # Otherwise, there will be redundant characters appearing in head or tail
     # when user is going to repeat unindenting text.
     if data.HasSelection():
         if is_selection_reversed:
-            data.SelectionStart = len(head) + len(result)
+            data.SelectionStart = sel_start + len(result)
+            data.SelectionEnd = sel_start
+            data.CursorPos = data.SelectionStart
         else:
-            data.SelectionEnd = len(head) + len(result)
-
-    # Update buffer
-    result = head + result + tail
-    result_len = len(result)
-    strncpy(data.Buf, _bytes(result), result_len + 1)
-
-    # Update state of callback data
-    data.BufTextLen = result_len
-    data.CursorPos = result_len
-    data.BufDirty = True
+            data.SelectionStart = sel_start
+            data.SelectionEnd = sel_start + len(result)
+            data.CursorPos = data.SelectionEnd
     return 0
 
 
@@ -5027,38 +5033,57 @@ cdef int _input_text_unindent(cimgui.ImGuiInputTextCallbackData* data):
     char_indent = callback_config.char_indent
 
     is_selection_reversed = False
-    start, end = data.SelectionStart, data.SelectionEnd
-    if data.HasSelection() and start > end:
+    sel_start, sel_end = data.SelectionStart, data.SelectionEnd
+    if data.HasSelection() and sel_start > sel_end:
         is_selection_reversed = True
-        start, end = end, start
+        sel_start, sel_end = sel_end, sel_start
 
     if data.HasSelection():
-        head = data.Buf[:start].decode()
+        head = data.Buf[:sel_start].decode()
         # Forward searching for new line character in case indentaion char will
         # be inserted between characters of a word.
-        if start > 0 and head[-1] != "\n":
-            start = head.rfind("\n")
-            if start == -1:
-                start = 0
-            head = data.Buf[:start].decode()
+        if sel_start > 0 and head[-1] != "\n":
+            sel_start = head.rfind("\n")
+            if sel_start == -1:
+                sel_start = 0
+            head = data.Buf[:sel_start].decode()
 
-        tail = data.Buf[end:].decode()
-        text = data.Buf[start:end].decode()
+        text = data.Buf[sel_start:sel_end].decode()
+        tail = data.Buf[sel_end:].decode()
+
+        # Backward searching for newline character in case the last line of text
+        # won't be indented
+        not_ends_with_newline = False
+        if sel_end <= len(data.Buf) and text[-1] != "\n":
+            idx = tail.find("\n")
+            if idx == -1:
+                not_ends_with_newline = True
+                sel_end = len(data.Buf)
+                text = data.Buf[sel_start:sel_end].decode()
+                tail = ""
+            else:
+                sel_end += idx + 1
+                text = data.Buf[sel_start:sel_end].decode()
+                tail = data.Buf[sel_end:].decode()
+
+        assert head + text + tail == data.Buf.decode(), (
+            "Recombination of text does not equal to the original one"
+        )
     else:
         # Unindent single line
         head = data.Buf[:data.CursorPos].decode()
-        start = len(head)
-        while start > 0 and head[start - 1] != "\n":
-            start -= 1
+        sel_start = len(head)
+        while sel_start > 0 and head[sel_start - 1] != "\n":
+            sel_start -= 1
         if len(char_indent) > 1:          # we are using spaces for indentation
-            if start + len(char_indent) > len(head):
-                end = len(head)
-                if head[start:end] == char_indent[:end-start]:
-                    data.DeleteChars(start, end-start)
+            if sel_start + len(char_indent) > len(head):
+                sel_end = len(head)
+                if head[sel_start:sel_end] == char_indent[:sel_end-sel_start]:
+                    data.DeleteChars(sel_start, sel_end-sel_start)
             else:
-                data.DeleteChars(start, len(char_indent))
-        elif head[start] == char_indent:  # we are using tab for indentation
-            data.DeleteChars(start, 1)
+                data.DeleteChars(sel_start, len(char_indent))
+        elif head[sel_start] == char_indent:  # we are using tab for indentation
+            data.DeleteChars(sel_start, 1)
         return 0
 
     len_indent = len(char_indent)
@@ -5087,21 +5112,24 @@ cdef int _input_text_unindent(cimgui.ImGuiInputTextCallbackData* data):
             start += idx + 1
 
     # Update buffer
-    result = head + result + tail
-    result_len = len(result)
-    strncpy(data.Buf, _bytes(result), result_len + 1)
+    buf = head + result + tail
+    buf_len = len(buf)
+    strncpy(data.Buf, _bytes(buf), buf_len + 1)
 
     # Update state of callback data
-    data.BufTextLen = result_len
-    data.CursorPos = result_len
+    data.BufTextLen = buf_len
     data.BufDirty = True
 
     # NOTE: Position of selection index (start or end) should also be updated.
     if data.HasSelection():
         if is_selection_reversed:
-            data.SelectionStart = result_len
+            data.SelectionStart = sel_start + len(result)
+            data.SelectionEnd = sel_start
+            data.CursorPos = data.SelectionStart
         else:
-            data.SelectionEnd = result_len
+            data.SelectionStart = sel_start
+            data.SelectionEnd = sel_start + len(result)
+            data.CursorPos = data.SelectionEnd
     return 0
 
 
