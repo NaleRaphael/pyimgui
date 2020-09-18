@@ -4908,7 +4908,7 @@ cdef int input_text_callback(cimgui.ImGuiInputTextCallbackData* data):
         # NOTE: `data.EventChar` won't be updated when a modifier key is pressed, so that we
         # have to detect ImGuiIO.keys_down[KEY_TAB] too.
         if (state.event_char == 9 or get_io().keys_down[KEY_TAB]):
-            if get_io().key_ctrl:
+            if get_io().key_shift:
                 is_filtered = _input_text_unindent(data)
                 state.has_pending_event = False
             else:
@@ -4920,7 +4920,7 @@ cdef int input_text_callback(cimgui.ImGuiInputTextCallbackData* data):
         if data.EventChar == 9:     # KEY_TAB
             state.has_pending_event = True
             is_filtered = 1
-        elif get_io().key_ctrl:
+        elif get_io().key_shift:
             # NOTE: State of modifier keys won't be reset until there is another key is pressed,
             # so that we have to keep tracing it.
             state.has_pending_event = True
